@@ -16,7 +16,6 @@
  */
 package kafka.server.metadata
 
-import java.util.Properties
 
 import kafka.coordinator.group.GroupCoordinator
 import kafka.coordinator.transaction.TransactionCoordinator
@@ -24,8 +23,9 @@ import kafka.log.LogConfig
 import kafka.server.RaftReplicaManager
 import kafka.utils.Implicits._
 import org.apache.kafka.common.config.ConfigResource
-import org.apache.kafka.common.metadata.{ConfigRecord, PartitionRecord, RemoveTopicRecord, TopicRecord}
+import org.apache.kafka.common.metadata.{ConfigRecord, PartitionRecord, RegisterBrokerRecord, RemoveTopicRecord, TopicRecord, UnregisterBrokerRecord}
 import org.apache.kafka.common.protocol.ApiMessage
+import org.apache.kafka.common.security.auth.SecurityProtocol
 import org.apache.kafka.common.utils.MockTime
 import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.junit.jupiter.api.Assertions._
@@ -34,6 +34,7 @@ import org.mockito.ArgumentMatchers._
 import org.mockito.Mockito._
 import org.mockito.{ArgumentCaptor, ArgumentMatchers}
 
+import java.util.Properties
 import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 
@@ -184,4 +185,71 @@ class BrokerMetadataListenerTest {
     replicas.map(Int.box).toList.asJava
   }
 
+  @Test
+  def testRegisterAndUnregisterBroker() : Unit = {
+    val name = "foo"
+    val host = "localhost"
+    val port = 9092 + brokerId
+    val rack = "arack"
+    val brokerEpoch = 100
+
+    registerBroker(name, host, rack, port, brokerEpoch)
+    unregisterBroker(brokerEpoch)
+  }
+
+  private def registerBroker(
+    name : String,
+    host : String,
+    rack : String,
+    port : Int,
+    brokerEpoch :Int
+  ) : Unit ={
+
+    val brokerRecord = new RegisterBrokerRecord().
+      setBrokerId(brokerId).
+      setBrokerEpoch(brokerEpoch).
+      setRack(rack)
+
+      brokerRecord.endPoints().add(new RegisterBrokerRecord.BrokerEndpoint().
+      setSecurityProtocol(SecurityProtocol.PLAINTEXT.id).
+      setPort(port).
+      setName(name).
+      setHost(host))
+
+    lastMetadataOffset += 1
+    listener.execCommits(lastOffset = lastMetadataOffset, List[ApiMessage](
+      brokerRecord,
+    ).asJava)
+
+    assertEquals(brokerRecord, metadataCache.getAliveBroker(brokerId))
+
+
+    val imageCapture: ArgumentCaptor[MetadataImageBuilder] =
+      ArgumentCaptor.forClass(classOf[MetadataImageBuilder])
+    verify(replicaManager).handleMetadataRecords(
+      imageCapture.capture(),
+      ArgumentMatchers.eq(lastMetadataOffset),
+      any()
+    )
+
+    val createImage = imageCapture.getValue
+    assertEquals(brokerRecord, createImage.broker(brokerId))
+  }
+
+  private def unregisterBroker(
+    brokerEpoch : Int
+  ) : Unit ={
+
+    val unregisterBrokerRecord = new UnregisterBrokerRecord()
+      .setBrokerId(brokerId)
+      .setBrokerEpoch(brokerEpoch)
+
+    lastMetadataOffset += 1
+    listener.execCommits(lastOffset = lastMetadataOffset, List[ApiMessage](
+      unregisterBrokerRecord,
+    ).asJava)
+
+    assertEquals(null, metadataCache.getAliveBroker(brokerId))
+  }
 }
+
